@@ -1,0 +1,80 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # 05:23 UTC daily — keep main current with Gentleman-Programming/gentle-ai
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream/main into main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/Gentleman-Programming/gentle-ai.git
+          git fetch upstream main --no-tags
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          count="$(git rev-list --count main..upstream/main)"
+          echo "behind=${count}" >> "$GITHUB_OUTPUT"
+          if [ "${count}" -gt 0 ]; then
+            echo "outdated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "outdated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream/main
+        id: merge
+        if: steps.check.outputs.outdated == 'true'
+        run: |
+          if git merge --no-edit upstream/main; then
+            echo "conflicts=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflicts=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push merged main
+        if: steps.merge.outputs.conflicts == 'false'
+        run: git push origin main
+
+      - name: Report merge conflicts
+        if: steps.merge.outputs.conflicts == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          git merge --abort
+          open_issues="$(gh issue list --state open --search "Upstream sync failed in:title" --json number --jq 'length')"
+          if [ "${open_issues}" -eq 0 ]; then
+            gh issue create \
+              --title "Upstream sync failed: merge conflicts on main" \
+              --body "The scheduled merge of Gentleman-Programming/gentle-ai main into this repository hit conflicts and was aborted. Resolve manually: git fetch upstream && git merge upstream/main. Run log: ${RUN_URL}"
+          fi
+          exit 1
+
+      - name: Already up to date
+        if: steps.check.outputs.outdated == 'false'
+        run: echo "main is already current with upstream/main"
